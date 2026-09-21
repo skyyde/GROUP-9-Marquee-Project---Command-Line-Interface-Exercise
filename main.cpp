@@ -12,6 +12,18 @@ void displayHelp() {
     cout << "set_speed <milliseconds> - sets the marquee animation refresh speed in milliseconds" << endl;
     cout << "exit - terminates the console" << endl;
 }
+//thingy
+void setText(string input, string &marqueeText) {
+    string text = input.substr(9);
+
+     if (text.empty()) {
+        cout << "no text provided" << endl;
+        return;
+     }
+
+     marqueeText = text;
+    cout << "text saved for marquee: " << marqueeText << endl;
+    }
 
 // MEMBER 3
 void startMarquee() {
@@ -24,6 +36,7 @@ void stopMarquee() {
 
 int main() {
     string command;
+    string marqueeText;
 
     // MEMBER 1
     cout << "Welcome to CSOPESY!" << endl;
@@ -53,6 +66,13 @@ int main() {
 
         else if (command == "stop_marquee") {
             stopMarquee();
+        }
+        else if (command.rfind("set_text ", 0) == 0) {
+            setText(command, marqueeText);
+        }
+
+        else if (command == "set_text") {
+            cout << "no text provided" << endl;
         }
 
         else if (command == "exit") {
