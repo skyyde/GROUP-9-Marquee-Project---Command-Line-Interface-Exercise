@@ -1,7 +1,34 @@
 #include <iostream>
 #include <string>
+#include <atomic>
+
+#if defined(_WIN32) && defined(__MINGW32__) && !defined(_GLIBCXX_HAS_GTHREADS)
+    // apparently my(member 3) needs this cause of mingw running win32 threads. refer to marquee functions for explanation
+    #include <windows.h>
+    #define USE_WIN32_THREADS 1
+#else
+    // Standard C++
+    #include <thread>
+    #include <chrono>
+    #define USE_WIN32_THREADS 0
+#endif
 
 using namespace std;
+
+// Marquee thread control
+atomic<bool> isRunning(false);
+
+#if USE_WIN32_THREADS
+    HANDLE marqueeThreadHandle = NULL;
+    struct MarqueeData {
+        string text;
+        int speed;
+    } g_marqueeData;
+#else
+    thread marqueeThread;
+#endif
+
+
 
 // MEMBER 2
 void displayHelp() {
@@ -47,13 +74,116 @@ void setSpeed(string input, int &marqueeSpeed) {
 }
 
 // MEMBER 3
-void startMarquee() {
-    // marquee logic
+#if USE_WIN32_THREADS
+// THIS IS SCUFFED. anyways my code wouldnt run without win32 thread compatibility soooo. yeah. 
+// well this atleast provides compatibility support. this pretty much does identical job to standard c++
+// except it uses win32 threads instead of standard c++ threads. so yeah. refer to else statement for inline comment.
+DWORD WINAPI marqueeWorker(LPVOID lpParam) {
+    MarqueeData* data = (MarqueeData*)lpParam;
+    if (data->text.empty()) return 0;
+
+    string currentText = data->text;
+    while (isRunning) {
+        currentText = currentText.substr(1) + currentText[0];
+        cout << "\rMarquee: " << currentText << "    " << flush;
+        Sleep(data->speed);
+    }
+    cout << "\r" << string(currentText.length() + 20, ' ') << "\r" << flush;
+    return 0;
+}
+
+void startMarquee(const string& marqueeText, int marqueeSpeed) {
+    if (isRunning) {
+        cout << "Marquee is already running." << endl;
+        return;
+    }
+
+    if (marqueeText.empty()) {
+        cout << "Please set text first using 'set_text <text>'." << endl;
+        return;
+    }
+
+    cout << "Marquee started." << endl;
+    isRunning = true;
+    g_marqueeData = { marqueeText, marqueeSpeed };
+    marqueeThreadHandle = CreateThread(NULL, 0, marqueeWorker, &g_marqueeData, 0, NULL);
 }
 
 void stopMarquee() {
-    // marquee logic
+    if (!isRunning) {
+        cout << "Marquee is not running." << endl;
+        return;
+    }
+
+    isRunning = false;
+    if (marqueeThreadHandle != NULL) {
+        WaitForSingleObject(marqueeThreadHandle, INFINITE);
+        CloseHandle(marqueeThreadHandle);
+        marqueeThreadHandle = NULL;
+    }
+    cout << "Marquee stopped." << endl;
 }
+
+#else
+
+void marqueeWorker(string text, int speed) {
+    if (text.empty()) return;
+
+    string currentText = text;
+    
+    while (isRunning) {
+        // char rotation in string
+        currentText = currentText.substr(1) + currentText[0];
+        
+        // overwrite previous line with new marquee text
+        cout << "\rMarquee: " << currentText << "    " << flush;
+        
+        // speed control
+        this_thread::sleep_for(chrono::milliseconds(speed));
+    }
+
+    // Clear marquee when stopped
+    cout << "\r" << string(currentText.length() + 20, ' ') << "\r" << flush;
+}
+
+void startMarquee(const string& marqueeText, int marqueeSpeed) {
+    // keeps only one instance running
+    if (isRunning) {
+        cout << "Marquee is already running." << endl;
+        return;
+    }
+
+    // in case no text
+    if (marqueeText.empty()) {
+        cout << "Please set text first using 'set_text <text>'." << endl;
+        return;
+    }
+
+    // start
+    cout << "Marquee started." << endl;
+    isRunning = true;
+    marqueeThread = thread(marqueeWorker, marqueeText, marqueeSpeed);
+
+}
+
+void stopMarquee() {
+    // check if running instance
+    if (!isRunning) {
+        cout << "Marquee is not running." << endl;
+        return;
+    }
+
+    // self explanatory
+    isRunning = false;
+
+    // clean up thread
+    if (marqueeThread.joinable()) {
+        marqueeThread.join();
+    }
+    cout << "Marquee stopped." << endl;
+}
+
+#endif
 
 int main() {
     string command;
@@ -83,7 +213,7 @@ int main() {
         }
 
         else if (command == "start_marquee") {
-            startMarquee();
+            startMarquee(marqueeText, marqueeSpeed);
         }
 
         else if (command == "stop_marquee") {
