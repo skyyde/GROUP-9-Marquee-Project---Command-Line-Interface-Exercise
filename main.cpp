@@ -25,6 +25,27 @@ void setText(string input, string &marqueeText) {
     cout << "text saved for marquee: " << marqueeText << endl;
     }
 
+void setSpeed(string input, int &marqueeSpeed) {
+    string speedStr = input.substr(10);
+
+    if (speedStr.empty()) {
+        cout << "no speed provided" << endl;
+        return;
+    }
+
+    try {
+        int speed = stoi(speedStr);
+        if (speed <= 0) {
+            cout << "speed must be a positive number" << endl;
+            return;
+        }
+        marqueeSpeed = speed;
+        cout << "speed set to " << marqueeSpeed << " ms" << endl;
+    } catch (...) {
+        cout << "invalid speed format" << endl;
+    }
+}
+
 // MEMBER 3
 void startMarquee() {
     // marquee logic
@@ -37,6 +58,7 @@ void stopMarquee() {
 int main() {
     string command;
     string marqueeText;
+    int marqueeSpeed = 1000; // default speed in milliseconds
 
     // MEMBER 1
     cout << "Welcome to CSOPESY!" << endl;
@@ -73,6 +95,13 @@ int main() {
 
         else if (command == "set_text") {
             cout << "no text provided" << endl;
+        }
+
+        else if (command.rfind("set_speed ", 0) == 0) {
+            setSpeed(command, marqueeSpeed);
+        }
+        else if (command == "set_speed") {
+            cout << "no speed provided" << endl;
         }
 
         else if (command == "exit") {
