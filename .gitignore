@@ -1,0 +1,11 @@
+# Local compiler outputs (the already tracked main.exe remains tracked).
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+/main
+
+# Python development artifacts.
+__pycache__/
+*.pyc

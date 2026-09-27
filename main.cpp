@@ -3,28 +3,39 @@
 #include <atomic>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
     #define NOMINMAX
+#endif
     #include <windows.h>
 #endif
 
 #if defined(_WIN32) && defined(__MINGW32__) && !defined(_GLIBCXX_HAS_GTHREADS)
-    // apparently my(member 3) needs this cause of mingw running win32 threads. refer to marquee functions for explanation
-    #include <windows.h>
+    // Older MinGW libraries without gthreads cannot construct std::thread.
     #define USE_WIN32_THREADS 1
 #else
-    // Standard C++
     #include <thread>
     #include <chrono>
+    #include <system_error>
     #define USE_WIN32_THREADS 0
+#endif
+
+#ifndef _WIN32
+    #include <mutex>
 #endif
 
 using namespace std;
 
-// Marquee thread control
+// The main thread owns each marquee session until stopMarquee joins it.
 atomic<bool> isRunning(false);
 atomic<int> frameDelay(50);
+
+#ifndef _WIN32
+// ANSI frames and command replies share the same output stream.
+mutex consoleMutex;
+#endif
 
 #ifdef _WIN32
 // Legacy console text selection otherwise suspends all animation output.
@@ -43,15 +54,9 @@ struct ConsoleInputMode {
 
 #if USE_WIN32_THREADS
     HANDLE marqueeThreadHandle = NULL;
-    struct MarqueeData {
-        string text;
-        int speed;
-    } g_marqueeData;
 #else
     thread marqueeThread;
 #endif
-
-
 
 // MEMBER 2
 void displayHelp() {
@@ -62,25 +67,25 @@ void displayHelp() {
     cout << "set_speed <milliseconds> - sets the marquee animation refresh speed in milliseconds" << endl;
     cout << "exit - terminates the console" << endl;
 }
-//thingy
-void setText(string input, string &marqueeText) {
+
+void setText(const string& input, string& marqueeText) {
     string text = input.substr(9);
 
-     if (text.empty()) {
+    if (text.empty()) {
         cout << "no text provided" << endl;
         return;
-     }
+    }
 
-     marqueeText = text;
+    marqueeText = text;
     cout << "text saved for marquee: " << marqueeText << endl;
     if (isRunning) {
         cout << "To display your saved text, type 'stop_marquee', then 'start_marquee'." << endl;
     } else {
         cout << "Type 'start_marquee' to display your saved text." << endl;
     }
-    }
+}
 
-void setSpeed(string input, int &marqueeSpeed) {
+void setSpeed(const string& input, int& marqueeSpeed) {
     string speedStr = input.substr(10);
 
     if (speedStr.empty()) {
@@ -89,7 +94,12 @@ void setSpeed(string input, int &marqueeSpeed) {
     }
 
     try {
-        int speed = stoi(speedStr);
+        size_t parsed = 0;
+        int speed = stoi(speedStr, &parsed);
+        if (speedStr.find_first_not_of(" \t\r\n\f\v", parsed) != string::npos) {
+            cout << "invalid speed format" << endl;
+            return;
+        }
         if (speed <= 0) {
             cout << "speed must be a positive number" << endl;
             return;
@@ -97,7 +107,9 @@ void setSpeed(string input, int &marqueeSpeed) {
         marqueeSpeed = speed;
         frameDelay = speed;
         cout << "speed set to " << marqueeSpeed << " ms" << endl;
-    } catch (...) {
+    } catch (const invalid_argument&) {
+        cout << "invalid speed format" << endl;
+    } catch (const out_of_range&) {
         cout << "invalid speed format" << endl;
     }
 }
@@ -105,6 +117,43 @@ void setSpeed(string input, int &marqueeSpeed) {
 vector<string> bannerRows;
 int marqueeWidth = 76;
 vector<string> marqueeBox(int offset, int width);
+
+// Keep colors separate from frame text so escape codes never affect clipping.
+#ifdef _WIN32
+WORD marqueeRowColor(size_t row, size_t rowCount, WORD original, char symbol = '\0') {
+    WORD foreground = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    if (row >= 4 && row < rowCount - 2)
+        foreground = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    if (row == 0 || row == 2 || row == rowCount - 1) {
+        if (symbol == '*')
+            foreground = FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+        else if (symbol == 'o' || symbol == '<' || symbol == '>')
+            foreground = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    }
+    // Replace only foreground bits, retaining the terminal's background.
+    return static_cast<WORD>((original & 0xFFF0) | foreground);
+}
+#else
+const char* marqueeRowColor(size_t row, size_t rowCount, char symbol = '\0') {
+    if (row == 0 || row == 2 || row == rowCount - 1) {
+        if (symbol == '*') return "\033[1;95m";
+        if (symbol == 'o' || symbol == '<' || symbol == '>') return "\033[1;96m";
+    }
+    if (row >= 4 && row < rowCount - 2) return "\033[22;94m";
+    return "\033[1;93m";
+}
+
+void printMarqueeRow(const string& line, size_t row, size_t rowCount) {
+    const char* previousColor = nullptr;
+    for (size_t column = 0; column < line.size(); ++column) {
+        const size_t colorRow = column < 2 || column >= line.size() - 2 ? 0 : row;
+        const char* color = marqueeRowColor(colorRow, rowCount, line[column]);
+        if (color != previousColor) cout << color;
+        cout << line[column];
+        previousColor = color;
+    }
+}
+#endif
 
 // Reuse a command area below the seven-row box instead of allowing command
 // output to scroll into the animation's fixed drawing area.
@@ -153,18 +202,40 @@ void clearMarqueeDisplay() {
 void prepareBanner(const string& text) {
     bannerRows = vector<string>{text.empty() ? "WELCOME TO CSOPESY" : text};
 #ifdef _WIN32
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
     CONSOLE_SCREEN_BUFFER_INFO info = {};
-    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info)) {
-        marqueeWidth = max(1, min(76, static_cast<int>(info.srWindow.Right - info.srWindow.Left + 1) - 3));
+    const bool hasConsole = GetConsoleScreenBufferInfo(output, &info) != 0;
+    if (hasConsole) {
+        marqueeWidth = max(1, min(76, static_cast<int>(info.srWindow.Right - info.srWindow.Left + 1) - 5));
     }
-#else
-    cout << "\033[2J\033[H";
 #endif
     int contentWidth = 0;
     for (const string& row : bannerRows)
         contentWidth = max(contentWidth, static_cast<int>(row.size()));
-    // Print the complete blank box first, leaving the command prompt below it.
-    for (const string& row : marqueeBox(-contentWidth, marqueeWidth)) cout << row << endl;
+    // Print the complete box first, leaving the command prompt below it.
+    const vector<string> frame = marqueeBox(-contentWidth, marqueeWidth);
+    for (size_t row = 0; row < frame.size(); ++row) {
+#ifdef _WIN32
+        if (hasConsole) {
+            for (size_t column = 0; column < frame[row].size(); ++column) {
+                const size_t colorRow = column < 2 || column >= frame[row].size() - 2 ? 0 : row;
+                const WORD color = marqueeRowColor(colorRow, frame.size(), info.wAttributes, frame[row][column]);
+                SetConsoleTextAttribute(output, color);
+                cout << frame[row][column] << flush;
+            }
+        } else {
+            cout << frame[row];
+        }
+#else
+        printMarqueeRow(frame[row], row, frame.size());
+#endif
+        cout << endl;
+    }
+#ifdef _WIN32
+    if (hasConsole) SetConsoleTextAttribute(output, info.wAttributes);
+#else
+    cout << "\033[22;39m" << flush;
+#endif
 }
 
 // Copy only the part of an unchanged row that overlaps the fixed window.
@@ -181,25 +252,39 @@ int nextMarqueeOffset(int offset, int contentWidth, int windowWidth) {
     return offset >= windowWidth ? -contentWidth : offset + 1;
 }
 
+string centerMarqueeLabel(const string& text, int width) {
+    string label = text.substr(0, width);
+    label.insert(0, (width - label.size()) / 2, ' ');
+    label.resize(width, ' ');
+    return label;
+}
+
 vector<string> marqueeBox(int offset, int width) {
-    string title = "[ NOW SHOWING ]";
-    title.resize(min(width, static_cast<int>(title.size())));
-    int leftPadding = (width - static_cast<int>(title.size())) / 2;
-    string heading = string(leftPadding, ' ') + title;
-    heading.resize(width, ' ');
-    const string border = "+" + string(width, '=') + "+";
-    const string blank = "|" + string(width, ' ') + "|";
-    vector<string> rows = {border, "|" + heading + "|",
-        "+" + string(width, '-') + "+", blank};
+    string trim(width, '=');
+    for (int column = 3; column < width; column += 8) trim[column] = 'o';
+    for (int column = 7; column < width; column += 8) trim[column] = '*';
+    const string border = "++" + trim + "++";
+    string divider(width, '=');
+    if (width >= 4) {
+        divider[width / 2 - 1] = '<';
+        divider[width / 2] = '>';
+    }
+    const string blank = "||" + string(width, ' ') + "||";
+
+    vector<string> rows = {
+        border,
+        "||" + centerMarqueeLabel("NOW SHOWING", width) + "||",
+        "++" + divider + "++",
+        blank
+    };
     for (const string& row : bannerRows)
-        rows.push_back("|" + marqueeFrame(row, offset, width) + "|");
+        rows.push_back("||" + marqueeFrame(row, offset, width) + "||");
     rows.push_back(blank);
     rows.push_back(border);
     return rows;
 }
 
-void animateMarquee(int speed) {
-    frameDelay = speed;
+void animateMarquee() {
     int contentWidth = 0;
     for (const string& row : bannerRows)
         contentWidth = max(contentWidth, static_cast<int>(row.size()));
@@ -215,17 +300,19 @@ void animateMarquee(int speed) {
         // Draw one rectangle at the visible window's top. Unlike individual
         // row writes, this cannot wrap into the next row after a resize.
         // Follow the viewport when command output scrolls the console.
-        int drawWidth = min(width + 2, static_cast<int>(info.srWindow.Right - info.srWindow.Left + 1));
+        int drawWidth = min(width + 4, static_cast<int>(info.srWindow.Right - info.srWindow.Left + 1));
         int drawHeight = min(static_cast<int>(frame.size()),
                              static_cast<int>(info.srWindow.Bottom - info.srWindow.Top - 1));
         if (drawWidth > 0 && drawHeight > 0) {
             vector<CHAR_INFO> cells(static_cast<size_t>(drawWidth) * drawHeight);
             for (int row = 0; row < drawHeight; ++row) {
                 const string& line = frame[row];
+                const WORD edgeColor = marqueeRowColor(0, frame.size(), info.wAttributes);
                 for (int column = 0; column < drawWidth; ++column) {
                     CHAR_INFO& cell = cells[static_cast<size_t>(row) * drawWidth + column];
                     cell.Char.AsciiChar = line[column];
-                    cell.Attributes = info.wAttributes;
+                    cell.Attributes = column < 2 || column >= width + 2 ? edgeColor :
+                        marqueeRowColor(row, frame.size(), info.wAttributes, line[column]);
                 }
             }
             COORD size = {static_cast<SHORT>(drawWidth), static_cast<SHORT>(drawHeight)};
@@ -236,11 +323,15 @@ void animateMarquee(int speed) {
             WriteConsoleOutputA(output, cells.data(), size, source, &area);
         }
 #else
-        cout << "\033[s";
-        for (size_t row = 0; row < frame.size(); ++row) {
-            cout << "\033[" << row + 1 << ";1H" << frame[row];
+        {
+            lock_guard<mutex> outputLock(consoleMutex);
+            cout << "\033[s";
+            for (size_t row = 0; row < frame.size(); ++row) {
+                cout << "\033[" << row + 1 << ";1H";
+                printMarqueeRow(frame[row], row, frame.size());
+            }
+            cout << "\033[22;39m\033[u" << flush;
         }
-        cout << "\033[u" << flush;
 #endif
         offset = nextMarqueeOffset(offset, contentWidth, width);
         // Short waits keep stop/exit responsive even at a slow animation speed.
@@ -258,13 +349,21 @@ void animateMarquee(int speed) {
 }
 
 // MEMBER 3
+void marqueeWorker() {
+    try {
+        animateMarquee();
+    } catch (const exception& error) {
+        // Keep the session owned until stopMarquee joins the completed worker.
+#ifndef _WIN32
+        lock_guard<mutex> outputLock(consoleMutex);
+#endif
+        cerr << "Marquee animation failed: " << error.what() << endl;
+    }
+}
+
 #if USE_WIN32_THREADS
-// THIS IS SCUFFED. anyways my code wouldnt run without win32 thread compatibility soooo. yeah. 
-// well this atleast provides compatibility support. this pretty much does identical job to standard c++
-// except it uses win32 threads instead of standard c++ threads. so yeah. refer to else statement for inline comment.
-DWORD WINAPI marqueeWorker(LPVOID lpParam) {
-    MarqueeData* data = (MarqueeData*)lpParam;
-    animateMarquee(data->speed);
+DWORD WINAPI win32MarqueeWorker(LPVOID) {
+    marqueeWorker();
     return 0;
 }
 
@@ -276,10 +375,15 @@ void startMarquee(const string& marqueeText, int marqueeSpeed) {
 
     clearMarqueeDisplay();
     prepareBanner(marqueeText);
-    cout << "Marquee started. Type 'stop_marquee' to stop." << endl;
+    frameDelay = marqueeSpeed;
     isRunning = true;
-    g_marqueeData = { marqueeText, marqueeSpeed };
-    marqueeThreadHandle = CreateThread(NULL, 0, marqueeWorker, &g_marqueeData, 0, NULL);
+    marqueeThreadHandle = CreateThread(NULL, 0, win32MarqueeWorker, NULL, 0, NULL);
+    if (marqueeThreadHandle == NULL) {
+        isRunning = false;
+        cout << "Unable to start marquee." << endl;
+        return;
+    }
+    cout << "Marquee started. Type 'stop_marquee' to stop." << endl;
 }
 
 void stopMarquee() {
@@ -300,37 +404,34 @@ void stopMarquee() {
 
 #else
 
-void marqueeWorker(int speed) {
-    animateMarquee(speed);
-}
-
 void startMarquee(const string& marqueeText, int marqueeSpeed) {
-    // keeps only one instance running
     if (isRunning) {
         cout << "Marquee is already running." << endl;
         return;
     }
 
-    // start
     clearMarqueeDisplay();
     prepareBanner(marqueeText);
-    cout << "Marquee started. Type 'stop_marquee' to stop." << endl;
+    frameDelay = marqueeSpeed;
     isRunning = true;
-    marqueeThread = thread(marqueeWorker, marqueeSpeed);
-
+    try {
+        marqueeThread = thread(marqueeWorker);
+    } catch (const system_error&) {
+        isRunning = false;
+        cout << "Unable to start marquee." << endl;
+        return;
+    }
+    cout << "Marquee started. Type 'stop_marquee' to stop." << endl;
 }
 
 void stopMarquee() {
-    // check if running instance
     if (!isRunning) {
         cout << "Marquee is not running." << endl;
         return;
     }
 
-    // self explanatory
     isRunning = false;
 
-    // clean up thread
     if (marqueeThread.joinable()) {
         marqueeThread.join();
     }
@@ -365,52 +466,69 @@ int main() {
     cout << "Type 'help' to see the available commands." << endl;
     cout << endl;
 
-    while (true) {
-        cout << "Command> ";
-        if (!getline(cin, command)) {
-            if (isRunning) stopMarquee();
-            break;
-        }
+    try {
+        while (true) {
+            {
+#ifndef _WIN32
+                lock_guard<mutex> outputLock(consoleMutex);
+#endif
+                cout << "Command> " << flush;
+            }
+            // Do not hold the output lock while waiting for keyboard input.
+            if (!getline(cin, command)) {
+                if (isRunning) stopMarquee();
+                break;
+            }
 
-        prepareCommandArea();
+#ifndef _WIN32
+            unique_lock<mutex> outputLock(consoleMutex);
+#endif
+            prepareCommandArea();
 
-        if (command == "help") {
-            displayHelp();
-        }
+            if (command == "help") {
+                displayHelp();
+            }
+            else if (command == "start_marquee") {
+                startMarquee(marqueeText, marqueeSpeed);
+            }
+            else if (command == "stop_marquee") {
+#ifndef _WIN32
+                // The worker may need this lock before it can finish.
+                outputLock.unlock();
+#endif
+                stopMarquee();
+            }
+            else if (command.rfind("set_text ", 0) == 0) {
+                setText(command, marqueeText);
+            }
+            else if (command == "set_text") {
+                cout << "no text provided" << endl;
+            }
+            else if (command.rfind("set_speed ", 0) == 0) {
+                setSpeed(command, marqueeSpeed);
+            }
+            else if (command == "set_speed") {
+                cout << "no speed provided" << endl;
+            }
+            else if (command == "exit") {
+#ifndef _WIN32
+                outputLock.unlock();
+#endif
+                if (isRunning) stopMarquee();
+                cout << "Terminating console..." << endl;
+                break;
+            }
+            else {
+                cout << "Invalid command." << endl;
+            }
 
-        else if (command == "start_marquee") {
-            startMarquee(marqueeText, marqueeSpeed);
+            cout << endl;
         }
-
-        else if (command == "stop_marquee") {
-            stopMarquee();
-        }
-        else if (command.rfind("set_text ", 0) == 0) {
-            setText(command, marqueeText);
-        }
-
-        else if (command == "set_text") {
-            cout << "no text provided" << endl;
-        }
-
-        else if (command.rfind("set_speed ", 0) == 0) {
-            setSpeed(command, marqueeSpeed);
-        }
-        else if (command == "set_speed") {
-            cout << "no speed provided" << endl;
-        }
-
-        else if (command == "exit") {
-            if (isRunning) stopMarquee();
-            cout << "Terminating console..." << endl;
-            break;
-        }
-
-        else {
-            cout << "Invalid command." << endl;
-        }
-
-        cout << endl;
+    } catch (const exception& error) {
+        // An input/allocation failure must not leave a joinable thread behind.
+        if (isRunning) stopMarquee();
+        cerr << "Console error: " << error.what() << endl;
+        return 1;
     }
 
     return 0;
