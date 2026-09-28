@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <stdexcept>
+#include <streambuf>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -37,24 +38,6 @@ atomic<int> frameDelay(50);
 
 #ifndef _WIN32
 mutex consoleMutex;
-#endif
-
-#ifdef _WIN32
-struct ConsoleInputMode {
-    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD original = 0;
-    bool saved = GetConsoleMode(input, &original) != 0;
-
-    ConsoleInputMode() {
-        if (saved)
-            SetConsoleMode(input, (original | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE);
-    }
-
-    ~ConsoleInputMode() {
-        if (saved)
-            SetConsoleMode(input, original);
-    }
-};
 #endif
 
 #if USE_WIN32_THREADS
@@ -92,7 +75,7 @@ bool setText(const string& input, string& marqueeText) {
     return true;
 }
 
-bool parseSpeed(const string& value, int& speed) {
+bool parseInteger(const string& value, int& number) {
     try {
         size_t parsed = 0;
         int candidate = stoi(value, &parsed);
@@ -100,7 +83,7 @@ bool parseSpeed(const string& value, int& speed) {
         if (value.find_first_not_of(" \t\r\n\f\v", parsed) != string::npos)
             return false;
 
-        speed = candidate;
+        number = candidate;
         return true;
     } catch (const invalid_argument&) {
         return false;
@@ -118,7 +101,7 @@ void setSpeed(const string& input) {
     }
 
     int speed = 0;
-    if (!parseSpeed(speedStr, speed)) {
+    if (!parseInteger(speedStr, speed)) {
         cout << "invalid speed format" << endl;
     } else if (speed <= 0) {
         cout << "speed must be a positive number" << endl;
@@ -130,11 +113,10 @@ void setSpeed(const string& input) {
 
 // CONFIG FILE LOADING ---------------------------------------------------
 
-void loadConfig(string& marqueeText) {
+void loadConfig(string& marqueeText, int& pollingRateMs, bool& startRunning) {
     ifstream config("config.txt");
 
     if (!config) {
-        cout << "config.txt not found or unreadable; using default text and speed." << endl;
         return;
     }
 
@@ -160,14 +142,39 @@ void loadConfig(string& marqueeText) {
 
             const string value = line.substr(equals + 1);
             if (key == "marqueeText") {
-                marqueeText = value;
-                continue;
+                const size_t textFirst = value.find_first_not_of(" \t");
+                const size_t textLast = value.find_last_not_of(" \t");
+                if (textFirst != string::npos && value[textFirst] == '"') {
+                    if (textLast > textFirst && value[textLast] == '"') {
+                        marqueeText = value.substr(textFirst + 1, textLast - textFirst - 1);
+                        continue;
+                    }
+                } else {
+                    marqueeText = value;
+                    continue;
+                }
             }
 
-            int speed = 0;
-            if (key == "marqueeSpeed" && parseSpeed(value, speed) && speed > 0) {
-                frameDelay = speed;
+            int number = 0;
+            if (key == "marqueeSpeed" && parseInteger(value, number) && number > 0) {
+                frameDelay = number;
                 continue;
+            }
+            if (key == "pollingRate" && parseInteger(value, number) && number >= 1 &&
+                number <= 1000) {
+                pollingRateMs = number;
+                continue;
+            }
+            if (key == "startRunning") {
+                const size_t valueFirst = value.find_first_not_of(" \t");
+                const size_t valueLast = value.find_last_not_of(" \t");
+                const string setting = valueFirst == string::npos
+                                           ? ""
+                                           : value.substr(valueFirst, valueLast - valueFirst + 1);
+                if (setting == "true" || setting == "false") {
+                    startRunning = setting == "true";
+                    continue;
+                }
             }
         }
 
@@ -176,6 +183,138 @@ void loadConfig(string& marqueeText) {
 
     if (config.bad())
         cout << "Error reading config.txt; keeping values loaded so far." << endl;
+}
+
+// KEYBOARD POLLING ---------------------------------------------------
+
+#ifdef _WIN32
+class ConsoleInput : public streambuf {
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD originalMode = 0;
+    streambuf* originalBuffer = nullptr;
+    int pollingRateMs;
+    char character = '\0';
+    int repeatsLeft = 0;
+
+  protected:
+    int_type underflow() override {
+        while (repeatsLeft == 0) {
+            INPUT_RECORD event = {};
+            DWORD count = 0;
+            if (!PeekConsoleInputA(input, &event, 1, &count))
+                throw runtime_error("Unable to check console input.");
+            if (count == 0) {
+                Sleep(pollingRateMs);
+                continue;
+            }
+            if (!ReadConsoleInputA(input, &event, 1, &count))
+                throw runtime_error("Unable to read console input.");
+            if (event.EventType == KEY_EVENT && event.Event.KeyEvent.bKeyDown &&
+                event.Event.KeyEvent.uChar.AsciiChar != '\0') {
+                character = event.Event.KeyEvent.uChar.AsciiChar;
+                repeatsLeft = max(1, static_cast<int>(event.Event.KeyEvent.wRepeatCount));
+            }
+        }
+
+        --repeatsLeft;
+        setg(&character, &character, &character + 1);
+        return traits_type::to_int_type(character);
+    }
+
+  public:
+    explicit ConsoleInput(int pollingRate) : pollingRateMs(pollingRate) {
+        if (!GetConsoleMode(input, &originalMode))
+            return;
+
+        DWORD mode =
+            (originalMode | ENABLE_EXTENDED_FLAGS) & ~(ENABLE_QUICK_EDIT_MODE | ENABLE_LINE_INPUT |
+                                                       ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+        if (!SetConsoleMode(input, mode))
+            throw runtime_error("Unable to configure keyboard polling.");
+        originalBuffer = cin.rdbuf(this);
+    }
+
+    ~ConsoleInput() {
+        if (originalBuffer != nullptr) {
+            cin.rdbuf(originalBuffer);
+            SetConsoleMode(input, originalMode);
+        }
+    }
+};
+
+void eraseInputCharacter(int columns) {
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info = {};
+    if (!GetConsoleScreenBufferInfo(output, &info)) {
+        for (int column = 0; column < columns; ++column)
+            cout << "\b \b";
+        cout << flush;
+        return;
+    }
+
+    int position = info.dwCursorPosition.Y * info.dwSize.X + info.dwCursorPosition.X;
+    position = max(0, position - columns);
+    COORD cursor = {static_cast<SHORT>(position % info.dwSize.X),
+                    static_cast<SHORT>(position / info.dwSize.X)};
+    DWORD written;
+    FillConsoleOutputCharacterA(output, ' ', columns, cursor, &written);
+    SetConsoleCursorPosition(output, cursor);
+}
+#endif
+
+bool readCommand(string& command) {
+#ifdef _WIN32
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (GetConsoleMode(input, &mode)) {
+        command.clear();
+        vector<int> characterWidths;
+        static bool skipLineFeed = false;
+
+        while (true) {
+            char character;
+            if (!cin.get(character)) {
+                if (cin.bad())
+                    throw runtime_error("Unable to read keyboard input.");
+                return false;
+            }
+
+            if (skipLineFeed && character == '\n') {
+                skipLineFeed = false;
+                continue;
+            }
+            skipLineFeed = false;
+
+            if (character == '\r' || character == '\n') {
+                skipLineFeed = character == '\r';
+                cout << endl;
+                return true;
+            }
+            if (character == '\x03' || character == '\x04' || character == '\x1A') {
+                cout << endl;
+                return false;
+            }
+            if (character == '\b') {
+                if (!command.empty()) {
+                    command.pop_back();
+                    eraseInputCharacter(characterWidths.back());
+                    characterWidths.pop_back();
+                }
+            } else if (static_cast<unsigned char>(character) >= 32 || character == '\t') {
+                int columns = 1;
+                if (character == '\t') {
+                    CONSOLE_SCREEN_BUFFER_INFO info = {};
+                    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &info))
+                        columns = 8 - info.dwCursorPosition.X % 8;
+                }
+                command += character;
+                characterWidths.push_back(columns);
+                cout << character << flush;
+            }
+        }
+    }
+#endif
+    return static_cast<bool>(getline(cin, command));
 }
 
 // MARQUEE DISPLAY AND LAYOUT ---------------------------------------------------
@@ -237,14 +376,14 @@ void prepareCommandArea() {
     if (firstRow >= info.srWindow.Bottom)
         return;
     DWORD written;
-    for (int row = firstRow; row <= info.srWindow.Bottom; ++row) {
+    for (int row = firstRow - 1; row <= info.srWindow.Bottom; ++row) {
         COORD position = {0, static_cast<SHORT>(row)};
         FillConsoleOutputCharacterA(output, ' ', info.dwSize.X, position, &written);
     }
     COORD position = {info.srWindow.Left, static_cast<SHORT>(firstRow)};
     SetConsoleCursorPosition(output, position);
 #else
-    cout << "\033[9;1H\033[J" << flush;
+    cout << "\033[8;1H\033[J\033[9;1H" << flush;
 #endif
 }
 
@@ -495,30 +634,44 @@ void stopMarquee() {
 // MAIN PROGRAM AND COMMAND LOOP (MEMBER 1) ---------------------------------------------------
 
 int main() {
-#ifdef _WIN32
-    ConsoleInputMode consoleInputMode;
-#endif
     string command;
     string marqueeText;
-
-    cout << "Welcome to CSOPESY!" << endl;
-    cout << endl;
-
-    cout << "Group developer:" << endl;
-    cout << "Mikyla Kirsten Aguirre" << endl;
-    cout << "Enrique Mateo Cruz" << endl;
-    cout << "Cedric Pallarca" << endl;
-    cout << "Julian Nicos Reyes" << endl;
-    cout << endl;
-
-    cout << "Version date: 2026-09-21" << endl;
-    cout << endl;
-
-    cout << "Type 'help' to see the available commands." << endl;
-    cout << endl;
+    int pollingRateMs = 10;
+    bool startRunning = false;
 
     try {
-        loadConfig(marqueeText);
+        loadConfig(marqueeText, pollingRateMs, startRunning);
+#ifdef _WIN32
+        ConsoleInput consoleInput(pollingRateMs);
+#endif
+
+        if (startRunning) {
+#ifndef _WIN32
+            lock_guard<mutex> outputLock(consoleMutex);
+#endif
+            startMarquee(marqueeText);
+        }
+
+        {
+#ifndef _WIN32
+            lock_guard<mutex> outputLock(consoleMutex);
+#endif
+            cout << "Welcome to CSOPESY!" << endl;
+            cout << endl;
+
+            cout << "Group developer:" << endl;
+            cout << "Mikyla Kirsten Aguirre" << endl;
+            cout << "Enrique Mateo Cruz" << endl;
+            cout << "Cedric Pallarca" << endl;
+            cout << "Julian Nicos Reyes" << endl;
+            cout << endl;
+
+            cout << "Version date: 2026-09-21" << endl;
+            cout << endl;
+
+            cout << "Type 'help' to see the available commands." << endl;
+            cout << endl;
+        }
 
         while (true) {
             {
@@ -528,7 +681,7 @@ int main() {
                 cout << "Command> " << flush;
             }
 
-            if (!getline(cin, command)) {
+            if (!readCommand(command)) {
                 if (isRunning)
                     stopMarquee();
                 break;

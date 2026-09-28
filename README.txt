@@ -65,18 +65,46 @@ CONFIGURATION
 Edit config.txt before Run/Debug. Set the IDE's working directory to this project
 folder so the program can find it. The file is read once at startup:
 
-marqueeText=Hello World
-marqueeSpeed=50
+marqueeText=CSOPESY
+marqueeSpeed=100
+pollingRate=250
+startRunning=true
 
-marqueeText preserves everything after '='; an empty value uses the welcome
-message. marqueeSpeed accepts positive integer milliseconds (1 to 2147483647).
+marqueeText sets the message. Spaces are preserved; optional surrounding double
+quotes are removed, so "  Hello  " keeps the spaces inside the quotes. Empty text
+uses the welcome message. A missing closing quote makes the setting invalid.
+marqueeSpeed accepts positive integer milliseconds (1 to 2147483647).
+pollingRate accepts integer milliseconds from 1 to 1000. It controls how
+long keyboard polling waits before checking again when no input is queued.
+startRunning accepts true or false: start immediately or wait for start_marquee.
+
 Blank lines and lines starting with # (after optional spaces) are ignored.
 Spaces around keys and numeric values are allowed. Do not add inline comments.
-Missing settings keep the defaults (welcome message and 50 ms). Invalid lines
-produce a warning and keep the previous value; the last valid duplicate wins.
-A missing/unreadable config.txt warns and uses defaults. No keyboard polling
-setting exists: std::getline waits for input while the worker animates.
-Use plain text (ASCII or UTF-8); the Windows renderer is byte-oriented.
+Missing settings keep defaults: welcome message, 50 ms refresh, 10 ms polling,
+and startRunning=false. Invalid lines warn and keep the previous valid value;
+the last valid duplicate wins. Config changes apply on the next launch, not
+during a run. set_speed changes refresh speed only.
+A missing/unreadable config.txt silently uses defaults.
+
+KEYBOARD POLLING
+In a Windows interactive console, the main thread checks queued keyboard events
+and sleeps for pollingRate when none remain. Already queued characters are
+read together; it does not sleep once per character. At 250 ms, a new key may
+wait roughly up to one quarter of a second before appearing, plus scheduling
+overhead. Lower intervals check more often. The animation thread has its own
+refresh delay and continues moving while the input thread sleeps.
+
+Characters still enter through std::cin and display through std::cout. A small
+ConsoleInput stream buffer supplies cin with polled Windows keyboard events.
+The program handles Enter, Backspace (including wrapped lines and tabs), key
+repeats and pasted commands. Ctrl+C, Ctrl+D and Ctrl+Z request clean shutdown.
+It uses basic end-of-line editing; arrow-key navigation/history is not provided.
+The original console mode and cin buffer are restored on normal/error cleanup.
+
+Use a real Windows console for polling tests, not an IDE's output-only panel.
+Redirected input and the existing non-Windows path use getline instead; they do
+not exercise keyboard polling. Text display remains byte-oriented: use ASCII
+for predictable results. Config files also accept UTF-8 with an optional BOM.
 
 SUBMISSION AND RECORDING
 For a SOURCE folder submission, include main.cpp, config.txt and this README.txt.
