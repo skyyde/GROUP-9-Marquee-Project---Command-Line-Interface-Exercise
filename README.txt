@@ -56,13 +56,32 @@ start_marquee
 stop_marquee
 exit
 
-Text changes made while running appear after stop_marquee and start_marquee.
+Text changes made while running automatically restart the animation with the
+new message. No extra command is needed; the scrolling position resets.
 Speed changes apply while running. The default frame delay is 50 milliseconds.
 Use an interactive console with enough space for the box and command replies.
 
+CONFIGURATION
+Edit config.txt before Run/Debug. Set the IDE's working directory to this project
+folder so the program can find it. The file is read once at startup:
+
+marqueeText=Hello World
+marqueeSpeed=50
+
+marqueeText preserves everything after '='; an empty value uses the welcome
+message. marqueeSpeed accepts positive integer milliseconds (1 to 2147483647).
+Blank lines and lines starting with # (after optional spaces) are ignored.
+Spaces around keys and numeric values are allowed. Do not add inline comments.
+Missing settings keep the defaults (welcome message and 50 ms). Invalid lines
+produce a warning and keep the previous value; the last valid duplicate wins.
+A missing/unreadable config.txt warns and uses defaults. No keyboard polling
+setting exists: std::getline waits for input while the worker animates.
+Use plain text (ASCII or UTF-8); the Windows renderer is byte-oriented.
+
 SUBMISSION AND RECORDING
-For a SOURCE folder submission, include main.cpp and this README.txt together.
+For a SOURCE folder submission, include main.cpp, config.txt and this README.txt.
 Before the timed quiz, prepare and verify the final build and your IDE's
-Run/Debug setup. The recorded test must show Run/Debug launching the program.
+Run/Debug setup and working directory. The recorded test must show editing
+config.txt first, then Run/Debug launching the program.
 During the test case, use the program's commands without accessing or modifying
 source code or recompiling to accommodate a case.
