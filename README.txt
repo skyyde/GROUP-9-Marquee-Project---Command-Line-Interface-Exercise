@@ -41,6 +41,10 @@ If a prepared main.exe is supplied, run it with .\main.exe from its folder.
 
 USING THE PROGRAM
 Enter one command per line and press Enter. Commands are case-sensitive.
+Leading whitespace and trailing whitespace on commands without arguments are
+accepted. Blank input is ignored. A space or tab can separate a command from
+its argument; set_text preserves everything after that first separator.
+Extra arguments to help, start_marquee, stop_marquee and exit are invalid.
 
 help                     List the commands and their descriptions.
 start_marquee            Start the saved text or default welcome message.
@@ -60,6 +64,10 @@ Text changes made while running automatically restart the animation with the
 new message. No extra command is needed; the scrolling position resets.
 Speed changes apply while running. The default frame delay is 50 milliseconds.
 Use an interactive console with enough space for the box and command replies.
+The audit used a 120-column, 30-row console. Keep at least that much room for
+the demo and check behavior again if you resize the window. Very long input
+can exceed the visible command area. On Windows, animation requires a real console;
+redirected output reports a rendering error and the worker stops safely.
 
 CONFIGURATION
 Edit config.txt before Run/Debug. Set the IDE's working directory to this project
@@ -113,3 +121,10 @@ Run/Debug setup and working directory. The recorded test must show editing
 config.txt first, then Run/Debug launching the program.
 During the test case, use the program's commands without accessing or modifying
 source code or recompiling to accommodate a case.
+
+FINAL TECHNICAL VERIFICATION
+See TECHNICAL_REPORT.md for the verification matrix, measured refresh/input
+timings, thread-safety explanation, professor questions and remaining manual
+demo checks. The audit folder contains reproducible tests and recorded results.
+The audit build scripts point to the MSVC installation used on this computer;
+the compiler commands above remain available on other installations.

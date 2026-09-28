@@ -53,7 +53,7 @@ void displayHelp() {
     cout << "start_marquee - animates a welcome banner, or your custom text" << endl;
     cout << "stop_marquee - stops the marquee animation" << endl;
     cout << "set_text <your_string> - accepts text input and saves it for the marquee" << endl;
-    cout << "set_speed <milliseconds> - sets the marquee animation refresh speed in milliseconds"
+    cout << "set_speed <milliseconds> - sets the frame delay (1 to 2147483647 ms)"
          << endl;
     cout << "exit - terminates the console" << endl;
 }
@@ -317,6 +317,23 @@ bool readCommand(string& command) {
     return static_cast<bool>(getline(cin, command));
 }
 
+void normalizeCommand(string& command) {
+    const size_t first = command.find_first_not_of(" \t\r\n\f\v");
+    if (first == string::npos) {
+        command.clear();
+        return;
+    }
+    command.erase(0, first);
+    const size_t separator = command.find_first_of(" \t\r\n\f\v");
+    const string name = command.substr(0, separator);
+    if (separator != string::npos && (name == "set_text" || name == "set_speed")) {
+        // Preserve the text after the first separator, including intentional spaces.
+        command[separator] = ' ';
+    } else {
+        command.erase(command.find_last_not_of(" \t\r\n\f\v") + 1);
+    }
+}
+
 // MARQUEE DISPLAY AND LAYOUT ---------------------------------------------------
 
 vector<string> bannerRows;
@@ -509,7 +526,7 @@ void animateMarquee() {
         HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
         CONSOLE_SCREEN_BUFFER_INFO info = {};
         if (!GetConsoleScreenBufferInfo(output, &info))
-            return;
+            throw runtime_error("Marquee output requires a Windows console.");
         int drawWidth =
             min(width + 4, static_cast<int>(info.srWindow.Right - info.srWindow.Left + 1));
         int drawHeight = min(static_cast<int>(frame.size()),
@@ -533,7 +550,8 @@ void animateMarquee() {
             SMALL_RECT area = {info.srWindow.Left, info.srWindow.Top,
                                static_cast<SHORT>(info.srWindow.Left + drawWidth - 1),
                                static_cast<SHORT>(info.srWindow.Top + drawHeight - 1)};
-            WriteConsoleOutputA(output, cells.data(), size, source, &area);
+            if (!WriteConsoleOutputA(output, cells.data(), size, source, &area))
+                throw runtime_error("Unable to draw marquee frame.");
         }
 #else
         {
@@ -572,6 +590,7 @@ void marqueeWorker() {
 #endif
         cerr << "Marquee animation failed: " << error.what() << endl;
     }
+    isRunning = false;
 }
 
 #if USE_WIN32_THREADS
@@ -581,12 +600,27 @@ DWORD WINAPI win32MarqueeWorker(LPVOID) {
 }
 #endif
 
+void joinMarqueeThread() {
+#if USE_WIN32_THREADS
+    if (marqueeThreadHandle != NULL) {
+        WaitForSingleObject(marqueeThreadHandle, INFINITE);
+        CloseHandle(marqueeThreadHandle);
+        marqueeThreadHandle = NULL;
+    }
+#else
+    if (marqueeThread.joinable())
+        marqueeThread.join();
+#endif
+}
+
 void startMarquee(const string& marqueeText) {
     if (isRunning) {
         cout << "Marquee is already running." << endl;
         return;
     }
 
+    // A failed worker may have finished but still needs to be joined.
+    joinMarqueeThread();
     clearMarqueeDisplay();
     prepareBanner(marqueeText);
     isRunning = true;
@@ -610,23 +644,13 @@ void startMarquee(const string& marqueeText) {
 }
 
 void stopMarquee() {
-    if (!isRunning) {
+    const bool wasRunning = isRunning.exchange(false);
+    joinMarqueeThread();
+    if (!wasRunning) {
         cout << "Marquee is not running." << endl;
         return;
     }
 
-    isRunning = false;
-#if USE_WIN32_THREADS
-    if (marqueeThreadHandle != NULL) {
-        WaitForSingleObject(marqueeThreadHandle, INFINITE);
-        CloseHandle(marqueeThreadHandle);
-        marqueeThreadHandle = NULL;
-    }
-#else
-    if (marqueeThread.joinable()) {
-        marqueeThread.join();
-    }
-#endif
     clearMarqueeDisplay();
     cout << "Marquee stopped." << endl;
 }
@@ -687,10 +711,14 @@ int main() {
                 break;
             }
 
+            normalizeCommand(command);
+
 #ifndef _WIN32
             unique_lock<mutex> outputLock(consoleMutex);
 #endif
             prepareCommandArea();
+            if (command.empty())
+                continue;
 
             if (command == "help") {
                 displayHelp();
@@ -735,9 +763,11 @@ int main() {
     } catch (const exception& error) {
         if (isRunning)
             stopMarquee();
+        joinMarqueeThread();
         cerr << "Console error: " << error.what() << endl;
         return 1;
     }
 
+    joinMarqueeThread();
     return 0;
 }
